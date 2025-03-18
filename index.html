@@ -63,7 +63,7 @@
     <option value="triangle">Triangle</option>
   </select><br>
   <label>Enemy Color:</label>
-  <input type="color" id="enemyColor" value="#FF0000"><br>
+    <input type="color" id="enemyColor" value="#FF0000"><br>
   <button onclick="saveSettings()">Save</button>
   <button onclick="closeSettings()">Close</button>
 </div>
@@ -79,13 +79,16 @@ const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 let spaceship = { x: canvas.width / 2 - 20, y: canvas.height - 60, width: 40, height: 40, speed: 5, color: '#FFFFFF', shape: 'triangle' };
-let lasers = [], enemies = [], keys = {};
+let lasers = [], enemies = [], explosions = [], powerUps = [], keys = {};
 let score = 0, highScore = localStorage.getItem('highScore') || 0;
 let gameRunning = true, shootCooldown = 0;
 let enemySettings = { shape: 'square', color: '#FF0000' };
 let spawnCooldown = 60;
 let spawnRate = 60;
 let difficulty = 'medium';
+let buddy = null; // Small buddy for yellow power-up
+let tripleShooterActive = false; // Triple shooter for purple power-up
+let tripleShooterTimer = 0; // Timer for triple shooter
 
 document.getElementById('highScore').innerText = 'High Score: ' + highScore;
 
@@ -93,7 +96,7 @@ document.getElementById('highScore').innerText = 'High Score: ' + highScore;
 const difficulties = {
   easy: { spawnRate: 80, enemySpeedMin: 1, enemySpeedMax: 2, playerSpeed: 6 },
   medium: { spawnRate: 60, enemySpeedMin: 2, enemySpeedMax: 4, playerSpeed: 5 },
-  hard: { spawnRate: 30, enemySpeedMin: 4, enemySpeedMax: 6, playerSpeed: 4 }
+  hard: { spawnRate: 30, enemySpeedMin: 2, enemySpeedMax: 8, playerSpeed: 4 }
 };
 
 function setDifficulty(level) {
@@ -217,13 +220,46 @@ function spawnEnemy() {
   let size = 40;
   let x = Math.random() * (canvas.width - size);
   let speed = Math.random() * (difficulties[difficulty].enemySpeedMax - difficulties[difficulty].enemySpeedMin) + difficulties[difficulty].enemySpeedMin;
-  enemies.push({ x, y: -size, width: size, height: size, speed, color: enemySettings.color, shape: enemySettings.shape });
+  let type = Math.random() < 0.1 ? 'zigzag' : 'normal'; // 10% chance for zigzag enemies
+  enemies.push({ x, y: -size, width: size, height: size, speed, color: enemySettings.color, shape: enemySettings.shape, type, angle: 0 });
+}
+
+function spawnPowerUp() {
+  if (Math.random() < 0.01) { // 1% chance to spawn a power-up
+    let type = Math.random() < 0.5 ? 'yellow' : 'purple'; // 50% chance for yellow or purple
+    powerUps.push({ x: Math.random() * (canvas.width - 20), y: -20, width: 20, height: 20, type });
+  }
+}
+
+function createExplosion(x, y) {
+  explosions.push({ x, y, radius: 0, maxRadius: 20, alpha: 1 });
+}
+
+function drawExplosion(explosion) {
+  ctx.beginPath();
+  ctx.arc(explosion.x, explosion.y, explosion.radius, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(255, 165, 0, ${explosion.alpha})`;
+  ctx.fill();
+  ctx.closePath();
+}
+
+function drawPowerUp(powerUp) {
+  ctx.fillStyle = powerUp.type === 'yellow' ? 'yellow' : 'purple';
+  ctx.beginPath();
+  ctx.arc(powerUp.x + powerUp.width / 2, powerUp.y + powerUp.height / 2, powerUp.width / 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.closePath();
 }
 
 function restartGame() {
   gameRunning = true;
   enemies = [];
   lasers = [];
+  explosions = [];
+  powerUps = [];
+  buddy = null;
+  tripleShooterActive = false;
+  tripleShooterTimer = 0;
   score = 0;
   spaceship.x = canvas.width / 2 - spaceship.width / 2;
   document.getElementById('gameOver').style.display = 'none';
@@ -244,8 +280,19 @@ function loop() {
   // Shooting
   if (shootCooldown > 0) shootCooldown--;
   if (keys['Space'] && shootCooldown === 0) {
-    lasers.push({ x: spaceship.x + spaceship.width / 2 - 2, y: spaceship.y, width: 4, height: 20 });
+    if (tripleShooterActive) {
+      lasers.push({ x: spaceship.x + spaceship.width / 2 - 10, y: spaceship.y, width: 4, height: 20 });
+      lasers.push({ x: spaceship.x + spaceship.width / 2 - 2, y: spaceship.y, width: 4, height: 20 });
+      lasers.push({ x: spaceship.x + spaceship.width / 2 + 6, y: spaceship.y, width: 4, height: 20 });
+    } else {
+      lasers.push({ x: spaceship.x + spaceship.width / 2 - 2, y: spaceship.y, width: 4, height: 20 });
+    }
     shootCooldown = 15;
+  }
+
+  // Buddy Shooting
+  if (buddy && shootCooldown === 0) {
+    lasers.push({ x: buddy.x + buddy.width / 2 - 2, y: buddy.y, width: 4, height: 20 });
   }
 
   // Lasers
@@ -255,10 +302,48 @@ function loop() {
   // Enemies
   if (--spawnCooldown <= 0) {
     spawnEnemy();
+    spawnPowerUp();
     spawnCooldown = spawnRate;
   }
-  enemies.forEach(enemy => enemy.y += enemy.speed);
+  enemies.forEach(enemy => {
+    if (enemy.type === 'zigzag') {
+      enemy.angle += 0.05;
+      enemy.x += Math.sin(enemy.angle) * 2;
+    }
+    enemy.y += enemy.speed;
+  });
   enemies = enemies.filter(enemy => enemy.y < canvas.height);
+
+  // Power-Ups
+  powerUps.forEach((powerUp, i) => {
+    powerUp.y += 2;
+    if (powerUp.y > canvas.height) {
+      powerUps.splice(i, 1);
+    } else if (powerUp.x < spaceship.x + spaceship.width && powerUp.x + powerUp.width > spaceship.x &&
+               powerUp.y < spaceship.y + spaceship.height && powerUp.y + powerUp.height > spaceship.y) {
+      if (powerUp.type === 'yellow') {
+        buddy = { x: spaceship.x - 30, y: spaceship.y, width: 20, height: 20 };
+      } else if (powerUp.type === 'purple') {
+        tripleShooterActive = true;
+        tripleShooterTimer = 300; // 5 seconds at 60 FPS
+      }
+      powerUps.splice(i, 1);
+    }
+  });
+
+  // Triple Shooter Timer
+  if (tripleShooterActive) {
+    tripleShooterTimer--;
+    if (tripleShooterTimer <= 0) {
+      tripleShooterActive = false;
+    }
+  }
+
+  // Buddy Movement
+  if (buddy) {
+    buddy.x = spaceship.x - 30;
+    buddy.y = spaceship.y;
+  }
 
   // Collisions
   enemies.forEach((enemy, i) => {
@@ -269,6 +354,7 @@ function loop() {
         lasers.splice(j, 1);
         score++;
         document.getElementById('score').innerText = 'Score: ' + score;
+        createExplosion(enemy.x + enemy.width / 2, enemy.y + enemy.height / 2); // Create explosion
       }
     });
 
@@ -284,9 +370,24 @@ function loop() {
     }
   });
 
+  // Explosions
+  explosions.forEach((explosion, i) => {
+    explosion.radius += 1;
+    explosion.alpha -= 0.05;
+    if (explosion.alpha <= 0) {
+      explosions.splice(i, 1);
+    }
+  });
+
   drawSpaceship();
+  if (buddy) {
+    ctx.fillStyle = 'yellow';
+    ctx.fillRect(buddy.x, buddy.y, buddy.width, buddy.height);
+  }
   lasers.forEach(drawLaser);
   enemies.forEach(drawEnemy);
+  powerUps.forEach(drawPowerUp);
+  explosions.forEach(drawExplosion);
 
   if (gameRunning) requestAnimationFrame(loop);
 }
